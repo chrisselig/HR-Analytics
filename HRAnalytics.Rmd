@@ -1,0 +1,283 @@
+---
+title: "HR Analytics - Predicting Employee Turnover"
+output:
+  html_document:
+    df_print: paged
+  html_notebook word_document: default
+  word_document: default
+---
+
+# Summary
+
+An organization is only as good as its employees, and as such, this post is about predicting employee turnover.  The blog has been inspired by an article on the [Business Science](http://www.business-science.io/business/2017/09/18/hr_employee_attrition.html) website.  I thought using an automated machine learning algorithm to find the best model was pretty interesting, so I wanted to give it a try on some data I found on [Kaggle](https://www.kaggle.com/ludobenistant/hr-analytics).
+
+The data and R code can be found on my [GitHub](https://github.com/chrisselig/HR-Analytics) page.
+
+
+## The Data
+
+
+**Note:  The data is simulated since companies do not like to release their sensitive HR data.**  
+
+### Data Features
+
+1. satisfactionLevel: Level of satisfaction (0-1).  1 = highly satisfied.
+
+2. lastEvaluation: Time since last performance evaluation (in Years).
+
+3. numberProject: Number of projects completed while at work.
+
+4. averageMonthlyHours: Average monthly hours worked.
+
+5. tenure: Number of years spent at the company.
+
+6. accident: Whether the employee had a workplace accident or not (0  no, 1 yes).
+
+7. left: Whether the employee left the workplace or not (0 or 1).  0 = stayed.
+
+8. promotion: Whether the employee was promoted in the last five years (0 or 1).  0 = not promoted.
+
+9. department: Department employee works in.
+
+10. salary: Relative level of salary (low, medium, high).
+
+## Exploratory Data Analysis
+
+```{r dataLoad, warning=FALSE, message=FALSE, include=FALSE}
+setwd("G:/Personal/R coding/Rmarkdown/HR_Analytics/HR-Analytics")
+
+#Avoid scientific notation
+options(scipen=999)
+
+############################################################ Packages - Other specific packages loaded when needed
+
+require(tidyverse);library(caret)
+
+############################################################ Load Data
+
+rawData <- read_csv("HR_comma_sep.csv")
+
+############################################################ Data Processing
+
+tidyData <- rawData
+names(tidyData) <- c('satisfactionLevel','lastEvaluation','numberProject','averageMonthlyHours','tenure',
+                     'accident','left','promotion','department','salary')
+# Factorize salary and department
+tidyData$salary <- factor(tidyData$salary,
+                             levels = c('low','medium','high'))
+tidyData$department <- factor(tidyData$department)
+
+# Reorder columns so left(predictor variable) is first
+tidyData <- tidyData %>%
+  select(left,everything())
+
+# Create training, validation and test sets
+set.seed(6)
+trainRows <- as.integer(sample(rownames(tidyData),dim(tidyData)[1]*.7))
+validRows <- as.integer(sample(setdiff(rownames(tidyData),trainRows),
+                    dim(tidyData)[1]*.2))
+testRows <- as.integer(setdiff(rownames(tidyData),union(trainRows,validRows)))
+
+trainData <- tidyData[trainRows,]
+validData <- tidyData[validRows,]
+testData <- tidyData[testRows,]
+
+```
+
+The data consists of 10 features and 14,999 observations with no missing values.  I have turned the data into 3 setss: training, validation, and test.  This was done because it is wise not to explore an entire dataset because you run the risk of overfitting your model, which means it will not perform well on unseen data.  What follows is an exploration of the training data set.
+
+The training data set is a random sample of 70% (10,499 rows) of the total dataset.  Some summary statistics for each of the numeric fields are listed below.  One immediate observation is the different scales for each feature, especially averageMonthlyHours. Depending on which model I use, I may need to normalize the features.  Other interesting information is that the satisfaction level averages 0.61, which a pretty large standard deviation, and finally, the means and medians are very close to each other implying that the distributions are approximately normal.   
+
+```{r summaryStats,  message=FALSE, warning=FALSE, include=FALSE}
+
+# Summary statistics
+summaryStats <- data.frame(mean = sapply(trainData[2:8],mean),
+                             median = sapply(trainData[2:8],median),
+                             sd = sapply(trainData[2:8],sd),
+                             min = sapply(trainData[2:8],min),
+                             max = sapply(trainData[2:8],max))
+```
+```{r summary,  message=FALSE, warning=FALSE, echo=FALSE}
+knitr::kable(round(summaryStats,2), caption = 'Summary Statistics for Features')     
+```
+
+Moving on, let's look at the two non-numeric features:  department employees work in and salary group.
+
+Reviewing the count of employees per department, it looks like the company develops new products and has a large sales force.  It looks like the organization may have too many IT and HR people, and probably management.
+
+```{r deptStats, message=FALSE, warning=FALSE, include=FALSE}
+# Count of Employees by Department (bar chart)
+deptCount <- trainData %>%
+  select(department) %>%
+  group_by(department) %>%
+  summarize(count = n()) %>%
+  ggplot(aes(x = reorder(department,-count), y=count))+
+  geom_bar(stat = 'identity')+
+  labs(x = 'Department', y = '', title = 'Count of Employees by Department')+
+  geom_text(aes(label = count),vjust = 1.5, colour = 'white')+
+  theme_classic()+
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank())+
+  theme(axis.text.x = element_text(angle = 45,hjust = 1))
+```
+```{r deptCount, message=FALSE, warning=FALSE, echo=FALSE}
+deptCount
+```
+
+Salary is grouped into "low", "medium", and "high" categories.  Not suprisingly, the "low" category has the majority of people.  I would imagine that the "high" category includes most management and top sales people.
+
+```{r salaryStats, message=FALSE, warning=FALSE, include=FALSE}
+# Salary distributions
+salaryCount <- trainData %>%
+  select(salary) %>%
+  group_by(salary) %>%
+  summarize(count = n()) %>%
+  ggplot(aes(x = salary, y=count))+
+  geom_bar(stat = 'identity')+
+  labs(x = 'Salary Group', y = '', title = 'Count of Employees by Salary Group')+
+  geom_text(aes(label = count),vjust = 1.5, colour = 'white')+
+  theme_classic()+
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank())
+
+```
+```{r salaryCount, message=FALSE, warning=FALSE, echo=FALSE}
+salaryCount
+```
+
+The last employee information we will look at is a histogram of tenure.  
+
+```{r tenureStats, message=FALSE, warning=FALSE, include=FALSE}
+tenurePlot <- trainData %>%
+  select(tenure) %>%
+  ggplot(aes(x = tenure))+
+  geom_histogram(binwidth = 1, colour = 'black') +
+  stat_bin(binwidth = 1,geom = 'text', aes(label = ..count..),vjust = -.3, colour = 'black')+
+  labs(x = 'Tenure', y= '',title = 'Tenure Distribution')+
+  theme_classic()+
+  scale_x_continuous(breaks = seq(0,10,by = 1))+
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank())
+
+
+```
+```{r tenureHist, message=FALSE, warning=FALSE, echo=FALSE}
+tenurePlot
+```
+
+It appears the company has a hiring freeze for the last 2 years since there is no one in this data set with under two years of service.  There is a huge spike of employees with three years of service and a decreasing amount per year after that.  
+
+## Modelling
+
+Moving onto the interesting part, I thought it would be wise to take a quick look at correlations to see if any of the features were highly correlated.  If they are, we can probably delete one of them.  As you can see below, nothing is really correlated with each other, but I am a bit surprised that the number of projects (numberProject) and average monthly hours (averageMonthlyHours) are not more highly correlated.  I guess this company has good project managers that keep everything running smoothly. 
+
+```{r corCalc, message=FALSE, warning=FALSE, include=FALSE}
+library(reshape)
+covData <- trainData
+covData$department <- as.numeric(covData$department)
+covData$salary <- as.numeric(covData$salary)
+cor.mat <- round(cor(covData),1)
+melted.cor.mat <- melt(cor.mat)
+heatMapCor <- melted.cor.mat %>%
+  ggplot(aes(x = X1, y = X2, fill = value))+
+  geom_tile()+
+  geom_text(aes(x = X1, y = X2, label = value))+
+  labs(x = '',y='', title = 'Correlation Matrix Between Variables')+
+  theme_classic()+
+  theme(axis.text.x = element_text(angle = 45,hjust = 1))
+
+```
+```{r corHeatMap, message=FALSE, warning=FALSE, echo=FALSE}
+heatMapCor
+```
+
+Now onto the model selection process.  Writing a few lines of code to initialize the package, turn the three datasets into the appropriate format, and we end up with the "best" model.  I did not even do any typical data processing, like turning each feature into a binary number, instead thinking I would just let the auto machine learning do its magic.
+
+```{r modelChoose, message=FALSE, warning=FALSE, include=FALSE}
+require(h2o)
+
+#Convert training set to h2o format so the model can use it
+h2o.init()
+trainHrData <- as.h2o(trainData)
+validHrData <- as.h2o(validData)
+testHrData <- as.h2o(testData)
+
+y='left'
+x = setdiff(names(trainHrData),y)
+
+set.seed(6)
+h2oModel <- h2o.automl(x=x,
+                       y =y,
+                       training_frame = trainHrData,
+                       validation_frame = validHrData,
+                       max_runtime_secs = 50)
+
+# Extract the most accurate model
+autoBestModel <- h2oModel@leader
+```
+
+
+In this case, the model selected was a "stacked ensemble" model (see below).
+
+```{r modelSelection, message=FALSE, warning=FALSE, echo=FALSE}
+autoBestModel
+```
+
+I am not going to go over any of the information in the above graphic, because the model statistics are not really that important for the training and validation sets.  The one thing I should mention though is that the machine learning algorithm actually uses the training set, and validates the model on the validation set to ensure the model is not overfitting.
+
+Instead of trying to explain the model using my own words, here is an explanation I like.  It is from Dr. Polikar from [Scholarpedia](http://www.scholarpedia.org/article/Ensemble_learning).
+
+"In Wolpert's stacked generalization (or stacking), an ensemble of classifiers is first trained using bootstrapped samples of the training data, creating Tier 1 classifiers, whose outputs are then used to train a Tier 2 classifier (meta-classifier) (Wolpert 1992). The underlying idea is to learn whether training data have been properly learned. For example, if a particular classifier incorrectly learned a certain region of the feature space, and hence consistently misclassifies instances coming from that region, then the Tier 2 classifier may be able to learn this behavior, and along with the learned behaviors of other classifiers, it can correct such improper training. Cross validation type selection is typically used for training the Tier 1 classifiers: the entire training dataset is divided into T blocks, and each Tier-1 classifier is first trained on (a different set of) T-1 blocks of the training data. Each classifier is then evaluated on the Tth (pseudo-test) block, not seen during training. The outputs of these classifiers on their pseudo-training blocks, along with the actual correct labels for those blocks constitute the training dataset for the Tier 2 classifier (see Figure 7)."
+
+****************Insert image here
+
+Neat.
+
+Now that we have that out of the way, how well did the model do on a unseen data set (test set)?
+
+```{r modelPredict, message=FALSE, warning=FALSE, include=FALSE, cache=TRUE}
+# Predict using best model on test data
+bestModelPredict <- h2o.predict(object = autoBestModel, newdata = testHrData)
+
+# Prep for performance assessment
+test_performance <- testHrData %>%
+  tibble::as_tibble() %>%
+  select(left) %>%
+  add_column(pred = as.vector(bestModelPredict$predict)) %>%
+  mutate_if(is.character, as.factor)
+test_performance$pred <- ifelse(test_performance$pred >.5,1,0)
+h20ConfusionMatrix <- table(test_performance)
+
+# Performance analysis
+tn <- h20ConfusionMatrix[1]
+tp <- h20ConfusionMatrix[4]
+fp <- h20ConfusionMatrix[3]
+fn <- h20ConfusionMatrix[2]
+
+accuracy <- round((tp + tn) / (tp + tn + fp + fn),2)
+# misclassification_rate <- round(1 - accuracy,2)
+true_positive_rate<- round(tp / (tp + fn),2)
+precision <- round(tp / (tp + fp),2)
+null_error_rate <- round(tn / (tp + tn + fp + fn),2)
+true_negative_rate <- round(tn/(tn+fp),2)
+
+h2oPerformance <- tibble(
+  accuracy,
+  # misclassification_rate,
+  true_positive_rate,
+  precision,
+  null_error_rate,
+  true_negative_rate
+) 
+
+h2o.shutdown(prompt = FALSE) #close java virtual machine connection
+```
+```{r modelPredictResults, warning=FALSE, message=FALSE, echo=FALSE}
+knitr::kable(h2oPerformance)
+```
+
+The model is highly accurate, predicting 99% of the values correctly.  In comparision, if we just picked that the person stays (0) everytime, we would have a 77% accuracy, so the model is better than guessing.  Even the true positive and true negative rates are pretty high, 95% and 100% respectively.  True positive in this case is that the model predicts the employee leaves, when they actually leave and true negative is the model predicts the employee stays when he/she actually stays.  Human resources would rather predict that an employee is high risk of leaving when they don't leave than vice versa, so, having a true posivite rate of only 95% is a bit of a disappointment.  There is normally a trade off between true positive and true negative rates, so, it would be interesting to tweak the model to see if we could improve the true positive rate.
+
+# Final Thoughts
+
+The next step would be to delve into the features that actually made the model so accurate and figure out which ones are most important.  Knowing what the important features are would provide human resources with a starting point on how to build processes and policies around retaining employees instead of watching them leave.  Unfortunately, where this data set is simulated, I do not see it as adding much value to this article. 
